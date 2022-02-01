@@ -50,6 +50,7 @@ import shutil
 import struct
 import contextlib
 import logging
+from multiprocessing import Pool, cpu_count
 
 # Map of ignored compiler option for the creation of a compilation database.
 # This map is used in _split_command method, which classifies the parameters
@@ -327,6 +328,12 @@ def intercept_build():
     return exit_code
 
 
+def chunks(lst, n):
+    """Yield successive n-sized chunks from lst."""
+    for i in range(0, len(lst), n):
+        yield lst[i:i + n]
+
+
 def capture(args, tools):
     """ Implementation of compilation database generation.
 
@@ -339,10 +346,13 @@ def capture(args, tools):
         environment = setup_environment(args, tmp_dir)
         exit_code = run_build(args.build, env=environment)
         # read the intercepted exec calls
-        calls = (parse_exec_trace(file) for file in exec_trace_files(tmp_dir))
-        safe_calls = (x for x in calls if x is not None)
         flags_filter = make_flags_filter(args.remove_flags_pattern)
-        current = compilations(safe_calls, tools, flags_filter)
+        files = exec_trace_files(tmp_dir)
+        files_chunks = chunks(files, 2048)
+        cmps = Compilations(tools, flags_filter)
+        p = Pool(cpu_count())
+        currents = p.map(cmps, files_chunks)
+        current = sum(currents, [])
         # filter out not desired entries
         include_filter = include(args.include, args.exclude)
         filtered = set(entry for entry in current if include_filter(entry))
@@ -391,24 +401,24 @@ def include(includes, excludes):
     return include_filter
 
 
-def make_flags_filter(pattern):
-    # type: str -> str -> bool
-    """Make a predicate to test if a flag should be removed"""
+class make_flags_filter:
+    def __init__(self, pattern):
+        # type: str -> str -> bool
+        """Make a predicate to test if a flag should be removed"""
 
-    if pattern is None:
-        regs = []
-    else:
-        regs = map(lambda p: re.compile(p), pattern.split(':'))
+        if pattern is None:
+            self.regs = []
+        else:
+            self.regs = map(lambda p: re.compile(p), pattern.split(':'))
 
-    def flags_filter(arg):
+    def __call__(self, arg):
         # type: str -> bool
         """Returns True if arg should be removed"""
 
-        for reg in regs:
+        for reg in self.regs:
             if reg.match(arg):
                 return True
         return False
-    return flags_filter
 
 
 def compilations(exec_calls, tools, flags_filter):
@@ -427,6 +437,17 @@ def compilations(exec_calls, tools, flags_filter):
                                                            tools,
                                                            flags_filter):
             yield compilation
+
+
+class Compilations:
+    def __init__(self, tools, flags_filter):
+        self.tools = tools
+        self.flags_filter = flags_filter
+
+    def __call__(self, files):
+        calls = (parse_exec_trace(file) for file in files)
+        safe_calls = [c for c in calls if c is not None]
+        return list(compilations(safe_calls, self.tools, self.flags_filter))
 
 
 def setup_environment(args, destination):

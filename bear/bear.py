@@ -314,8 +314,11 @@ def intercept_build():
     args = parse_args_for_intercept_build()
     tools = Tools(args.use_only, args.use_cc,
                   args.use_cxx, args.use_fortran)
+    t0 = time()
     exit_code, current = capture(args, tools)
+    print("capture time: {}".format(time() - t0))
 
+    t0 = time()
     # To support incremental builds, it is desired to read elements from
     # an existing compilation database from a previous run.
     if args.append and os.path.isfile(args.cdb):
@@ -324,6 +327,8 @@ def intercept_build():
         CompilationDatabase.save(entries, args.cdb, args.field_output)
     else:
         CompilationDatabase.save(current, args.cdb, args.field_output)
+
+    print("dump time: {}".format(time() - t0))
 
     return exit_code
 
@@ -334,6 +339,7 @@ def chunks(lst, n):
         yield lst[i:i + n]
 
 
+from time import time
 def capture(args, tools):
     """ Implementation of compilation database generation.
 
@@ -344,18 +350,30 @@ def capture(args, tools):
     with temporary_directory(prefix='intercept-') as tmp_dir:
         # run the build command
         environment = setup_environment(args, tmp_dir)
+        t0 = time()
         exit_code = run_build(args.build, env=environment)
+        print("..build time: {}".format(time() - t0))
         # read the intercepted exec calls
         flags_filter = make_flags_filter(args.remove_flags_pattern)
+        t0 = time()
         files = exec_trace_files(tmp_dir)
         files_chunks = chunks(files, 2048)
+        files_chunks = list(files_chunks)
+        print("..listing time: {}".format(time() - t0))
         cmps = Compilations(tools, flags_filter)
         p = Pool(cpu_count())
+        t0 = time()
         currents = p.map(cmps, files_chunks)
+        print("..processing time: {}".format(time() - t0))
+        t0 = time()
         current = sum(currents, [])
+        print("..summing time: {}".format(time() - t0))
+        t0 = time()
         # filter out not desired entries
         include_filter = include(args.include, args.exclude)
         filtered = set(entry for entry in current if include_filter(entry))
+        filtered = list(filtered)
+        print("..filtering time: {}".format(time() - t0))
         return exit_code, iter(filtered)
 
 
@@ -445,9 +463,12 @@ class Compilations:
         self.flags_filter = flags_filter
 
     def __call__(self, files):
+        t0 = time()
         calls = (parse_exec_trace(file) for file in files)
         safe_calls = [c for c in calls if c is not None]
-        return list(compilations(safe_calls, self.tools, self.flags_filter))
+        c = list(compilations(safe_calls, self.tools, self.flags_filter))
+        #print("single chunk time: {}".format(time() - t0))
+        return c
 
 
 def setup_environment(args, destination):
